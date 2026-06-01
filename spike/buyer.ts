@@ -56,20 +56,36 @@ console.log(`buyer=${account.address}  network=${NETWORK}  cap=${CAP} atomic`);
 
 const before = await usdcBalance();
 const res = await pay(SELLER, { method: "GET" });
-const after = await usdcBalance();
 
 console.log(`\nHTTP ${res.status}`);
 console.log("body:", await res.text());
 
-const settle: SettleResponse | undefined = httpClient.getPaymentSettleResponse((n) => res.headers.get(n));
-console.log("\nSettleResponse:", JSON.stringify(settle, null, 2));
+// SPIKE FINDING (b): getPaymentSettleResponse THROWS "Payment response header not found" when
+// there is no X-PAYMENT-RESPONSE header — i.e. the cancel path (>=400 handler). It does NOT
+// return undefined. So the receipt reader MUST be wrapped (shared/buyer.ts will do the same).
+let settle: SettleResponse | undefined;
+try {
+  settle = httpClient.getPaymentSettleResponse((n) => res.headers.get(n));
+} catch {
+  settle = undefined; // no settle header => payment was cancelled, not settled
+}
+console.log("\nSettleResponse:", JSON.stringify(settle ?? null, null, 2));
+
+// SPIKE FINDING (a): the facilitator returns the receipt OPTIMISTICALLY, before the tx is mined,
+// so an immediate balance read lags and shows delta=0 even on a real settlement. Wait for the
+// settlement tx to mine before reading the after-balance. (The receipt/tx hash is the source of
+// truth for the demo's ledger; balance reads are just the spike's independent on-chain check.)
+if (settle?.transaction) {
+  await pub.waitForTransactionReceipt({ hash: settle.transaction as `0x${string}` });
+}
+const after = await usdcBalance();
 
 const delta = after - before;
 console.log(`\nUSDC balance  before=${before}  after=${after}  delta=${delta}`);
 if (settle?.transaction && delta < 0n) {
   console.log(`✅ SETTLED on-chain — tx=${settle.transaction}, buyer charged ${-delta} atomic`);
-} else if (delta === 0n) {
-  console.log("✅ CANCELLED — no on-chain movement (expected in error mode / on >=400 handler)");
+} else if (!settle?.transaction && delta === 0n) {
+  console.log("✅ CANCELLED — no settle header, no on-chain movement (expected on >=400 handler)");
 } else {
   console.log("⚠️  unexpected: inspect SettleResponse + delta above");
 }
