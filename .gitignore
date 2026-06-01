@@ -1,0 +1,34 @@
+# === Secrets — NEVER commit (public repo) ===
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*-key.json
+secrets/
+wallets/
+
+# === Node / TypeScript ===
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.npm/
+.eslintcache
+
+# === Logs ===
+*.log
+npm-debug.log*
+logs/
+
+# === Editor / OS ===
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# === Runtime / misc ===
+coverage/
+.cache/
+tmp/
