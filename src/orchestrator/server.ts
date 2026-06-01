@@ -82,7 +82,10 @@ app.post("/goal", async (req, res) => {
     const data = (await r.json()) as { _priceUsd?: number };
     const receipt = readReceipt(r);
     const paid = data._priceUsd ?? 0;
-    budget.record(paid); // enforces HOP 1 ONLY — see budget.ts; can't veto lower hops
+
+    // search returned 2xx => this hop ALREADY settled on-chain (settle-on-2xx, §0.1). Record it in
+    // the Ledger FIRST, so the reconstructed chain total stays truthful even if the cap check below
+    // throws — money that moved must always be observable (the Ledger's whole job, §7).
     emit({
       type: "hop_settled",
       from: "orchestrator",
@@ -92,6 +95,8 @@ app.post("/goal", async (req, res) => {
       tx: receipt?.transaction,
       latencyMs: Date.now() - t0,
     });
+
+    budget.record(paid); // enforces HOP 1 ONLY — see budget.ts; can't veto lower hops
 
     // Breach is detectable only AFTER the fact, from the reconstructed chain total (observability,
     // not enforcement). Agents await their /ingest POSTs so the ledger is complete here (§7).
