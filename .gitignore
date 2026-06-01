@@ -32,3 +32,6 @@ Thumbs.db
 coverage/
 .cache/
 tmp/
+
+# === Claude Code personal settings (keep shared settings.json only) ===
+.claude/settings.local.json
