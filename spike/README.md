@@ -37,9 +37,10 @@ curl -XPOST localhost:5001/_surge     # bump the live price; re-buy to see the 4
 - [ ] **(c) Export surface** (`introspect.ts`): captured in the step-0 report. Key reconciliations vs the plan:
       both `new ExactEvmScheme(...)` and `registerExactEvmScheme(...)` exist; `SettleResponse` is a *type*
       (import from `@x402/core/types`); `getPaymentSettleResponse((n)=>res.headers.get(n))` is the receipt reader.
-- [ ] **(d) Facilitator speaks v2 on Base Sepolia.** The CDP facilitator needs `createAuthHeaders`
-      and the `@x402/*` packages ship **no** CDP auth helper — see `facilitator.ts`. Provision CDP JWT
-      auth (likely `@coinbase/x402`) or use a no-auth v2 facilitator before the on-chain run.
+- [x] **(d) Facilitator auth — RESOLVED.** The CDP facilitator needs `createAuthHeaders`, absent from
+      `@x402/*`. Wired via `@coinbase/x402` `createFacilitatorConfig(CDP_API_KEY_ID, CDP_API_KEY_SECRET)`,
+      which supplies both the CDP v2 URL and the JWT auth (`spike/facilitator.ts`). Live reachability on
+      Base Sepolia still confirmed by the (a) settlement run.
 
 ## Pre-confirmed by static analysis (no chain needed)
 These were already verified against the installed `.d.ts` and a clean `tsc --noEmit`:
