@@ -1,9 +1,9 @@
 {
-  "name": "bazaar-of-agents",
+  "name": "cascade",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "x402 v2 recursive payment-chain demo — a bazaar of paywalled AI agents on Base Sepolia",
+  "description": "x402 v2 recursive payment-chain demo — a cascade of paywalled AI agents on Base Sepolia",
   "scripts": {
     "spike:introspect": "tsx spike/introspect.ts",
     "spike:seller": "tsx spike/seller.ts",

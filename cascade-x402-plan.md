@@ -1,4 +1,4 @@
-# Bazaar of Agents — an x402 recursive payment-chain demo (x402 **v2** / `@x402/*`)
+# Cascade — an x402 recursive payment-chain demo (x402 **v2** / `@x402/*`)
 
 **What you're building:** a small ecosystem of paywalled AI micro-services where an orchestrator
 agent completes a user goal by *buying from sellers who buy from each other*. Every hop is a real
@@ -188,7 +188,7 @@ live.
 ## 2. Repo layout
 
 ```
-bazaar-of-agents/
+cascade/
 ├── package.json
 ├── tsconfig.json            # ESM: "module":"ESNext", "moduleResolution":"Bundler"
 ├── .env                     # never commit; testnet keys only
