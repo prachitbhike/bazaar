@@ -12,9 +12,9 @@
 import "dotenv/config";
 import express from "express";
 import { makePaywall } from "../shared/paywall";
-import { priceFor, priceForUsd, bumpLoad } from "../shared/pricing";
+import { priceFor, bumpLoad } from "../shared/pricing";
 import { reportEvent } from "../shared/report";
-import { hopDepthGuard, goalIdOf } from "../shared/hops";
+import { hopDepthGuard, hopContextMiddleware, goalIdOf } from "../shared/hops";
 
 const PAY_TO = process.env.VERIFY_PAY_TO as `0x${string}`;
 const NETWORK = process.env.NETWORK as `${string}:${string}`;
@@ -40,6 +40,7 @@ app.post("/surge", (_req, res) => {
   res.json({ ok: true, price: priceFor("verify") });
 });
 
+app.use(hopContextMiddleware); // seed goalId/depth so the (terminal) hop context is consistent
 app.use(hopDepthGuard);
 app.use(
   makePaywall({
@@ -53,10 +54,15 @@ app.use(
 
 app.get("/verify", async (req, res) => {
   const goalId = goalIdOf(req);
+  const t0 = Date.now();
+
+  // Terminal seller: nothing settles BELOW verify, so its in-band summary is always zeros except for
+  // its own handler wall-clock (which lets the buyer compute true per-hop latency by differencing, #5).
+  const summary = () => ({ settledUsd: 0, strandedUsd: 0, latencyMs: Date.now() - t0 });
 
   if (mode === "error") {
     await reportEvent({ type: "work_failed", agent: "verify", goalId, detail: "forced 500" });
-    res.status(500).json({ error: "verify failed" }); // >=400 -> middleware CANCELS the payment
+    res.status(500).json({ error: "verify failed", _settlement: summary() }); // >=400 -> CANCELS the payment
     return;
   }
 
@@ -68,12 +74,12 @@ app.get("/verify", async (req, res) => {
     detail: degraded ? "verified (LOW confidence)" : "verified source",
   });
 
-  // 200 -> settles. Echo the quoted price in-band so the buyer can ledger the EXACT charge — the
-  // exact-scheme SettleResponse carries only `transaction`, not `amount` (spike finding (a)).
+  // 200 -> settles. The buyer ledgers the EXACT charge from the amount it signed in the 402 (see
+  // shared/buyer.ts settledAmountUsd), so we no longer echo a recomputed price here (#4).
   res.json({
     verified: !degraded,
     confidence: degraded ? 0.05 : 0.91,
-    _priceUsd: priceForUsd("verify"),
+    _settlement: summary(),
   });
   bumpLoad("verify"); // bump AFTER responding -> affects the NEXT goal, not this in-flight quote (§0.3)
 });

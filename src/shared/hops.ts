@@ -9,6 +9,7 @@
  * Legit depths in the baseline topology: orchestrator->search = 1, search->fetch = 2,
  * fetch->verify = 3. Anything above MAX_HOP_DEPTH means a loop/bug.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Request, RequestHandler } from "express";
 
 export const HOP_DEPTH_HEADER = "X-Hop-Depth";
@@ -38,7 +39,36 @@ export const hopDepthGuard: RequestHandler = (req, res, next) => {
   next();
 };
 
-/** Headers for THIS seller's next downstream call: forward the goalId, increment the depth. */
-export function nextHopHeaders(req: Request, goalId: string): Record<string, string> {
-  return { [GOAL_ID_HEADER]: goalId, [HOP_DEPTH_HEADER]: String(incomingDepth(req) + 1) };
+/**
+ * Per-request hop context (plan §12, finding #6). Carries the goalId and INBOUND depth so the
+ * buyer's pay() wrapper (shared/buyer.ts) can stamp the outbound X-Goal-Id / X-Hop-Depth headers on
+ * EVERY downstream call automatically — no agent can forget them, and they're guaranteed present on
+ * the x402 wrapper's automatic 402->paid retry. It also exposes a `signedAtomic` slot the buyer's
+ * selector fills with the exact atomic amount it signed, so the caller can ledger the authoritative
+ * on-chain charge instead of a recomputed echo (finding #4).
+ *
+ * AsyncLocalStorage gives each in-flight request its own store, so concurrent goals never race on
+ * goalId, depth, or signedAtomic (§12).
+ */
+export interface HopContext {
+  goalId: string;
+  /** Depth of the INBOUND hop into this process; the root orchestrator has no inbound hop, so 0. */
+  depth: number;
+  /** Atomic amount the buyer's selector signed for THIS request's single outbound hop (USDC units). */
+  signedAtomic?: bigint;
 }
+
+const hopStorage = new AsyncLocalStorage<HopContext>();
+
+export function runInHopContext<T>(ctx: HopContext, fn: () => T): T {
+  return hopStorage.run(ctx, fn);
+}
+
+export function currentHop(): HopContext | undefined {
+  return hopStorage.getStore();
+}
+
+/** Express middleware: seed the hop context from the inbound request for the whole handler chain. */
+export const hopContextMiddleware: RequestHandler = (req, _res, next) => {
+  runInHopContext({ goalId: goalIdOf(req), depth: incomingDepth(req) }, () => next());
+};
