@@ -10,10 +10,11 @@
 import "dotenv/config";
 import express from "express";
 import { makePaywall } from "../shared/paywall";
-import { makeBuyer } from "../shared/buyer";
-import { priceFor, priceForUsd, bumpLoad } from "../shared/pricing";
+import { makeBuyer, readBody, readSettlement, composeSettlement } from "../shared/buyer";
+import { priceFor, bumpLoad } from "../shared/pricing";
 import { reportEvent } from "../shared/report";
-import { hopDepthGuard, goalIdOf, nextHopHeaders } from "../shared/hops";
+import { hopDepthGuard, hopContextMiddleware, goalIdOf } from "../shared/hops";
+import type { SettlementSummary } from "../shared/types";
 
 const PAY_TO = process.env.FETCH_PAY_TO as `0x${string}`;
 const NETWORK = process.env.NETWORK as `${string}:${string}`;
@@ -21,7 +22,7 @@ const VERIFY_URL = "http://localhost:4003/verify";
 if (!PAY_TO || !process.env.FETCH_PRIVATE_KEY) throw new Error("FETCH_PAY_TO and FETCH_PRIVATE_KEY are required");
 
 // per-payment cap: 50000 atomic = $0.05 (USDC has 6 decimals). The cap lives in the selector (§6/§12).
-const { pay, readReceipt } = makeBuyer(process.env.FETCH_PRIVATE_KEY as `0x${string}`, 50_000n);
+const { pay, readReceipt, settledAmountUsd } = makeBuyer(process.env.FETCH_PRIVATE_KEY as `0x${string}`, 50_000n);
 
 const app = express();
 
@@ -30,6 +31,7 @@ app.post("/surge", (_req, res) => {
   res.json({ ok: true, price: priceFor("fetch") });
 });
 
+app.use(hopContextMiddleware); // seed goalId/depth so the buyer auto-stamps the next hop's headers (#6)
 app.use(hopDepthGuard);
 app.use(
   makePaywall({
@@ -44,19 +46,27 @@ app.use(
 app.get("/fetch", async (req, res) => {
   const goalId = goalIdOf(req);
   const t0 = Date.now();
+  // verify's in-band summary; read below regardless of status so stranded spend BELOW us still
+  // propagates up even when our own sale cancels (#2). Stays zero if pay() throws before responding.
+  let downstream: SettlementSummary = { settledUsd: 0, strandedUsd: 0, latencyMs: 0 };
   try {
     await reportEvent({ type: "work_done", agent: "fetch", goalId, detail: "fetched + cleaned page" });
     await reportEvent({ type: "hop_start", from: "fetch", to: "verify", goalId });
 
-    const r = await pay(VERIFY_URL, { method: "GET", headers: nextHopHeaders(req, goalId) });
+    const hopStart = Date.now();
+    const r = await pay(VERIFY_URL, { method: "GET" }); // goalId + hop depth auto-stamped by the buyer (#6)
+    const hopMs = Date.now() - hopStart;
+
+    const body = await readBody(r); // read once: carries both the business fields AND verify's _settlement
+    downstream = readSettlement(body);
 
     // verify returned >=400 => the middleware CANCELLED our payment (we paid nothing) but we have
     // nothing to sell. Propagate as our own failure (which cancels OUR upstream payment too).
     if (!r.ok) throw new Error(`verify returned ${r.status}`);
 
-    const verification = (await r.json()) as { confidence: number; _priceUsd?: number };
+    const paidUsd = settledAmountUsd(r); // authoritative: the amount we signed on-chain, never a $0 echo (#4)
     const receipt = readReceipt(r); // tx hash = on-chain proof of settlement
-    const paidUsd = verification._priceUsd ?? 0; // exact charge, echoed in-band (§5)
+    const verification = body as { confidence: number };
     await reportEvent({
       type: "hop_settled",
       from: "fetch",
@@ -64,7 +74,7 @@ app.get("/fetch", async (req, res) => {
       goalId,
       amountUsd: paidUsd,
       tx: receipt?.transaction,
-      latencyMs: Date.now() - t0,
+      latencyMs: Math.max(0, hopMs - downstream.latencyMs), // TRUE per-hop latency: our RT minus verify's own (#5)
     });
 
     // BUSINESS RULE that creates GENUINE stranded spend (§11, verify mode "degraded"): we already
@@ -79,15 +89,29 @@ app.get("/fetch", async (req, res) => {
         tx: receipt?.transaction,
         reason: "paid verify (settled), result unusable, cannot resell",
       });
-      res.status(502).json({ error: "verification unusable", stranded: true });
+      res.status(502).json({
+        error: "verification unusable",
+        stranded: true,
+        // our payment to verify SETTLED then stranded; carry it (plus anything below) up in-band (#2).
+        _settlement: composeSettlement(paidUsd, paidUsd, downstream, Date.now() - t0),
+      });
       return;
     }
 
-    res.json({ page: "…cleaned content…", verification, _priceUsd: priceForUsd("fetch") });
+    res.json({
+      page: "…cleaned content…",
+      verification,
+      _settlement: composeSettlement(paidUsd, 0, downstream, Date.now() - t0),
+    });
     bumpLoad("fetch");
   } catch (err: any) {
     await reportEvent({ type: "hop_failed", from: "fetch", to: "verify", goalId, reason: String(err?.message ?? err) });
-    res.status(502).json({ error: "downstream verification failed" }); // cancels search->fetch
+    res.status(502).json({
+      error: "downstream verification failed", // cancels search->fetch
+      // our payment to verify was cancelled (or never signed); only spend BELOW verify (if any)
+      // settled — propagate it so the orchestrator's headline stays truthful (#2).
+      _settlement: composeSettlement(0, 0, downstream, Date.now() - t0),
+    });
   }
 });
 

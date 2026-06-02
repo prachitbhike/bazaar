@@ -45,3 +45,22 @@ export type CascadeEvent =
     });
 
 export type CascadeEventType = CascadeEvent["type"];
+
+/**
+ * In-band settlement summary every seller returns in its response body (`_settlement`), on BOTH the
+ * 2xx and the >=400 paths. It propagates each subtree's TRUE settled total up the synchronous call
+ * chain so the orchestrator's headline numbers (chain total, stranded total) are authoritative and
+ * do NOT depend on the out-of-band /ingest event POSTs landing (§7). The event stream still feeds
+ * the live dashboard; it just no longer carries the load-bearing totals.
+ *
+ * All amounts are USD, derived from the atomic amount the buyer actually signed in the 402 — never
+ * from a recomputed price echo (see shared/buyer.ts `settledAmountUsd`).
+ */
+export interface SettlementSummary {
+  /** Total USDC that settled on-chain in the responder's subtree (its own downstream hop + everything below). */
+  settledUsd: number;
+  /** Of `settledUsd`, how much settled but produced nothing usable and can't be recovered (the headline, §11). */
+  strandedUsd: number;
+  /** The responder's own handler wall-clock (request received -> response sent), for true per-hop latency by differencing (§9). */
+  latencyMs: number;
+}

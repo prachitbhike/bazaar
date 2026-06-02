@@ -13,10 +13,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import { makeBuyer } from "../shared/buyer";
+import { makeBuyer, readBody, readSettlement, composeSettlement } from "../shared/buyer";
 import { Ledger } from "./ledger";
 import { BudgetGuard } from "./budget";
-import { GOAL_ID_HEADER, HOP_DEPTH_HEADER } from "../shared/hops";
+import { runInHopContext } from "../shared/hops";
 import type { CascadeEvent } from "../shared/types";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -82,7 +82,7 @@ app.post("/ingest", (req, res) => {
 const ORCH_PRIVATE_KEY = process.env.ORCH_PRIVATE_KEY;
 if (!ORCH_PRIVATE_KEY || ORCH_PRIVATE_KEY === "0x") throw new Error("ORCH_PRIVATE_KEY is required");
 
-const { pay, readReceipt } = makeBuyer(ORCH_PRIVATE_KEY as `0x${string}`, 50_000n);
+const { pay, readReceipt, settledAmountUsd } = makeBuyer(ORCH_PRIVATE_KEY as `0x${string}`, 50_000n);
 const budgets = new Map<string, BudgetGuard>(); // keyed by goalId, NOT a singleton (§12)
 
 app.use(express.static(path.join(__dirname, "..", "dashboard")));
@@ -94,61 +94,75 @@ app.post("/goal", async (req, res) => {
   const budget = new BudgetGuard(0.03);
   budgets.set(goalId, budget);
 
-  const t0 = Date.now();
   emit({ type: "goal_start", goalId, goal: req.body?.goal ?? "demo goal", capUsd: budget.capUsd });
   emit({ type: "hop_start", from: "orchestrator", to: "search", goalId });
 
+  // Authoritative, in-band totals — propagated up the synchronous call chain from each seller's
+  // _settlement summary, NOT reconstructed from /ingest events. A dropped/failed event can therefore
+  // no longer make the budget check a false negative (#2/#4). The Ledger still ingests events for the
+  // live dashboard + per-agent margins (via emit() -> ledger.apply), but no longer backs these numbers.
+  let chainTotalUsd = 0;
+  let strandedUsd = 0;
+  let resultData: unknown = null;
+
   try {
-    const r = await pay(SEARCH_URL, {
-      method: "GET",
-      headers: { [GOAL_ID_HEADER]: goalId, [HOP_DEPTH_HEADER]: "1" },
+    await runInHopContext({ goalId, depth: 0 }, async () => {
+      const hopStart = Date.now();
+      const r = await pay(SEARCH_URL, { method: "GET" }); // goalId + X-Hop-Depth:1 auto-stamped by the buyer (#6)
+      const hopMs = Date.now() - hopStart;
+
+      const body = await readBody(r); // carries search's result AND its in-band _settlement summary
+      const downstream = readSettlement(body);
+      const { _settlement, ...clean } = (body ?? {}) as Record<string, unknown>;
+      resultData = clean;
+
+      // Whether or not OUR hop settles, stranded/settled spend BELOW search already moved on-chain;
+      // surface it from the in-band summary so even a FAILED goal reports what was lost (#2). Until
+      // our hop proves settled, fold it in as cancelled (own contribution 0).
+      ({ settledUsd: chainTotalUsd, strandedUsd } = composeSettlement(0, 0, downstream, 0));
+
+      // search returned >=400 => orchestrator->search was CANCELLED (settle-on-2xx, §0.1). Nothing of
+      // OURS settled, but the deepest stranded settlement (captured above) still happened.
+      if (!r.ok) throw new Error(`search returned ${r.status}`);
+
+      // search returned 2xx => this hop ALREADY settled on-chain. Use the authoritative amount we
+      // signed in the 402, never a recomputed echo (#4).
+      const paidUsd = settledAmountUsd(r);
+      const receipt = readReceipt(r);
+      emit({
+        type: "hop_settled",
+        from: "orchestrator",
+        to: "search",
+        goalId,
+        amountUsd: paidUsd,
+        tx: receipt?.transaction,
+        latencyMs: Math.max(0, hopMs - downstream.latencyMs), // TRUE per-hop latency: our RT minus search's own (#5)
+      });
+
+      // Fold in our settled hop (same operation each agent does) BEFORE record(), so money that moved
+      // stays observable even if the hop-1 cap enforcement below throws — the headline's whole job (§7).
+      ({ settledUsd: chainTotalUsd, strandedUsd } = composeSettlement(paidUsd, 0, downstream, 0));
+      budget.record(paidUsd); // enforces HOP 1 ONLY — see budget.ts; can't veto lower hops
     });
-    if (!r.ok) throw new Error(`search returned ${r.status}`);
-
-    const data = (await r.json()) as { _priceUsd?: number };
-    const receipt = readReceipt(r);
-    const paid = data._priceUsd ?? 0;
-
-    // search returned 2xx => this hop ALREADY settled on-chain (settle-on-2xx, §0.1). Record it in
-    // the Ledger FIRST, so the reconstructed chain total stays truthful even if the cap check below
-    // throws — money that moved must always be observable (the Ledger's whole job, §7).
-    emit({
-      type: "hop_settled",
-      from: "orchestrator",
-      to: "search",
-      goalId,
-      amountUsd: paid,
-      tx: receipt?.transaction,
-      latencyMs: Date.now() - t0,
-    });
-
-    budget.record(paid); // enforces HOP 1 ONLY — see budget.ts; can't veto lower hops
 
     // Breach is detectable only AFTER the fact, from the reconstructed chain total (observability,
-    // not enforcement). Agents await their /ingest POSTs so the ledger is complete here (§7).
-    const chainTotal = ledger.total(goalId);
-    if (chainTotal > budget.capUsd) {
+    // not enforcement) — now sourced in-band, independent of /ingest delivery (#2).
+    if (chainTotalUsd > budget.capUsd) {
       emit({
         type: "budget_exceeded",
         goalId,
         capUsd: budget.capUsd,
-        chainTotalUsd: chainTotal,
+        chainTotalUsd,
         enforcedUsd: budget.spent,
         detail: "goal cap blown by lower hops the orchestrator could not veto",
       });
     }
 
-    emit({ type: "goal_done", goalId, result: data, spent: chainTotal });
-    res.json({ ok: true, goalId, data, spent: chainTotal, strandedUsd: ledger.strandedTotal(goalId) });
+    emit({ type: "goal_done", goalId, result: resultData, spent: chainTotalUsd });
+    res.json({ ok: true, goalId, data: resultData, spent: chainTotalUsd, strandedUsd });
   } catch (err: any) {
-    emit({ type: "goal_failed", goalId, reason: String(err?.message ?? err), spent: ledger.total(goalId) });
-    res.status(502).json({
-      ok: false,
-      goalId,
-      error: String(err?.message ?? err),
-      spent: ledger.total(goalId),
-      strandedUsd: ledger.strandedTotal(goalId),
-    });
+    emit({ type: "goal_failed", goalId, reason: String(err?.message ?? err), spent: chainTotalUsd });
+    res.status(502).json({ ok: false, goalId, error: String(err?.message ?? err), spent: chainTotalUsd, strandedUsd });
   }
 });
 
