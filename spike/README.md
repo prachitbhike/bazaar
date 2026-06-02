@@ -31,12 +31,26 @@ curl -XPOST localhost:5001/_surge     # bump the live price; re-buy to see the 4
 ```
 
 ## The four findings to report (plan §0)
-- [ ] **(a) End-to-end settlement** works: `buyer` prints a real tx hash and the buyer's USDC balance drops.
-- [ ] **(b) Settle-vs-cancel on `>=400`** (plan §0.1): in `error` mode the balance delta is **0** (cancel,
-      not settle). This is the fact that *defines* stranded spend — confirm it for your build.
-- [ ] **(c) Export surface** (`introspect.ts`): captured in the step-0 report. Key reconciliations vs the plan:
-      both `new ExactEvmScheme(...)` and `registerExactEvmScheme(...)` exist; `SettleResponse` is a *type*
-      (import from `@x402/core/types`); `getPaymentSettleResponse((n)=>res.headers.get(n))` is the receipt reader.
+- [x] **(a) End-to-end settlement — CONFIRMED** (Base Sepolia, mode=ok). `SettleResponse.success=true`,
+      tx `0xdc973e19c2b28a34d1ae49312605e8cf25f698f3f98cee6f08f609a9e96c6a4f` (block 42292275). Buyer
+      charged exactly the quoted **1000 atomic = $0.0010**; the payTo address received +1000. **Gotcha:**
+      the facilitator returns the receipt *optimistically before the tx mines*, so an immediate balance
+      re-read shows delta=0 — trust `SettleResponse` (success + tx hash), or `waitForTransactionReceipt`
+      before reading balances. The demo ledger keys off the receipt tx, so this is a non-issue there.
+- [x] **(b) Settle-vs-cancel on `>=400` — CONFIRMED** (plan §0.1, mode=error). Handler returned 500 ⇒
+      the middleware **cancelled**: NO `X-PAYMENT-RESPONSE` header attached, and on-chain balances were
+      **unchanged** (buyer stayed at 19999000). This is the fact that *defines* stranded spend. **Gotcha:**
+      `getPaymentSettleResponse(...)` **throws** `"Payment response header not found"` on the cancel path —
+      it does NOT return `undefined`. So `shared/buyer.ts`'s `readReceipt` must try/catch (done in spike).
+- [x] **(c) Export surface — CONFIRMED** (`npm run spike:introspect`, deps installed, clean `tsc --noEmit`):
+      both `ExactEvmScheme` (Form A) and `registerExactEvmScheme` (Form B) are exported from
+      `@x402/evm/exact/{client,server}`; `x402Client` / `wrapFetchWithPayment` / `x402HTTPClient` from
+      `@x402/fetch`; `paymentMiddleware` + `x402ResourceServer` from `@x402/express`; `HTTPFacilitatorClient`
+      from `@x402/core/server`. `SettleResponse`/`PaymentRequirements` are erased *types* (not in runtime keys,
+      as expected — `import type` from `@x402/core/types`). All stretch schemes present too: `UptoEvmScheme`,
+      `BatchSettlementEvmScheme` (client+server), `AuthCaptureEvmScheme` (client only — server subpath not
+      shipped, matches plan §0.4). `setSettlementOverrides` + `SETTLEMENT_OVERRIDES_HEADER` exist for `upto`
+      partial settlement.
 - [x] **(d) Facilitator auth — RESOLVED.** The CDP facilitator needs `createAuthHeaders`, absent from
       `@x402/*`. Wired via `@coinbase/x402` `createFacilitatorConfig(CDP_API_KEY_ID, CDP_API_KEY_SECRET)`,
       which supplies both the CDP v2 URL and the JWT auth (`spike/facilitator.ts`). Live reachability on
