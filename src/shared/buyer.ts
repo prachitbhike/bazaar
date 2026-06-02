@@ -51,8 +51,15 @@ export function makeBuyer(privateKey: `0x${string}`, capAtomic: bigint): Buyer {
   const readReceipt = (res: Response): SettleResponse | undefined => {
     try {
       return httpClient.getPaymentSettleResponse((n: string) => res.headers.get(n));
-    } catch {
-      return undefined; // no X-PAYMENT-RESPONSE header => payment was cancelled, not settled
+    } catch (err: any) {
+      // ONLY the documented cancel path returns undefined: the SDK throws this exact message when
+      // there is no PAYMENT-RESPONSE / X-PAYMENT-RESPONSE header (spike finding (b)). Any OTHER
+      // error here means the header WAS present but failed to decode — a real settled receipt we
+      // must not silently drop (it would ledger as tx: undefined, indistinguishable from a cancel).
+      if (err instanceof Error && err.message === "Payment response header not found") {
+        return undefined; // no settlement header => payment was cancelled, not settled
+      }
+      throw err; // settled-but-undecodable receipt: surface it, don't lose the on-chain proof
     }
   };
 

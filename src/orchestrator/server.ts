@@ -36,12 +36,33 @@ function emit(evt: CascadeEvent): void {
   eventLog.push(stamped);
   ledger.apply(stamped);
   const msg = JSON.stringify(stamped);
-  for (const c of wss.clients) if (c.readyState === WebSocket.OPEN) c.send(msg);
+  for (const c of wss.clients) {
+    if (c.readyState !== WebSocket.OPEN) continue;
+    // A dead/half-closed socket (e.g. browser tab closed mid-broadcast) must not crash the funnel.
+    try {
+      c.send(msg);
+    } catch (err) {
+      console.error("[ws] broadcast send failed:", err);
+    }
+  }
 }
+
+// A socket 'error' (e.g. ECONNRESET when a tab closes mid-replay) is rethrown as an unhandled
+// exception by `ws` if unhandled — and this process is the SINGLE event hub for every goal. Swallow
+// it at the server level too so a listener failure can't kill the orchestrator.
+wss.on("error", (err) => console.error("[ws] server error:", err));
 
 // Replay the log to every new/refreshed dashboard (a raw WS broadcast is ephemeral, §9).
 wss.on("connection", (ws) => {
-  for (const evt of eventLog) ws.send(JSON.stringify(evt));
+  ws.on("error", (err) => console.error("[ws] connection error:", err));
+  for (const evt of eventLog) {
+    try {
+      ws.send(JSON.stringify(evt));
+    } catch (err) {
+      console.error("[ws] replay send failed:", err);
+      break; // socket is gone — stop replaying to it
+    }
+  }
 });
 
 // Explicit pull alternative to the WS replay.
@@ -56,7 +77,12 @@ app.post("/ingest", (req, res) => {
   res.sendStatus(204);
 });
 
-const { pay, readReceipt } = makeBuyer(process.env.ORCH_PRIVATE_KEY as `0x${string}`, 50_000n);
+// Validate the key BEFORE makeBuyer — otherwise a missing/placeholder "0x" makes viem's
+// privateKeyToAccount throw a cryptic error at module load, before listen(). Match the agents' style.
+const ORCH_PRIVATE_KEY = process.env.ORCH_PRIVATE_KEY;
+if (!ORCH_PRIVATE_KEY || ORCH_PRIVATE_KEY === "0x") throw new Error("ORCH_PRIVATE_KEY is required");
+
+const { pay, readReceipt } = makeBuyer(ORCH_PRIVATE_KEY as `0x${string}`, 50_000n);
 const budgets = new Map<string, BudgetGuard>(); // keyed by goalId, NOT a singleton (§12)
 
 app.use(express.static(path.join(__dirname, "..", "dashboard")));
@@ -127,5 +153,6 @@ app.post("/goal", async (req, res) => {
 });
 
 httpServer.listen(4000, () => {
-  console.log(`orchestrator + dashboard on http://localhost:4000  (buyer ${ "" + (process.env.ORCH_PRIVATE_KEY ? "loaded" : "MISSING") })`);
+  // Key is guaranteed present here — validated above before makeBuyer, so no "MISSING" branch.
+  console.log("orchestrator + dashboard on http://localhost:4000  (buyer loaded)");
 });

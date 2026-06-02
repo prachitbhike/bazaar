@@ -17,8 +17,11 @@ export const MAX_HOP_DEPTH = 4; // deepest legit hop is 3 (verify); >4 is a recu
 
 export function incomingDepth(req: Request): number {
   const raw = req.header(HOP_DEPTH_HEADER);
-  const n = Number(raw ?? "0");
-  return Number.isFinite(n) ? n : 0;
+  if (raw === undefined || raw.trim() === "") return 0; // header absent/blank => legit entrypoint, depth 0
+  // Header present but unparseable (non-numeric / NaN / Infinity / Express-joined "1,1"): do NOT
+  // silently reset to 0 — that bypasses the guard. Return a value that trips hopDepthGuard.
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : MAX_HOP_DEPTH + 1;
 }
 
 export function goalIdOf(req: Request): string {
