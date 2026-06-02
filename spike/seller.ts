@@ -15,9 +15,7 @@
  */
 import "dotenv/config";
 import express from "express";
-import { paymentMiddleware, x402ResourceServer } from "@x402/express";
-import { ExactEvmScheme } from "@x402/evm/exact/server";
-import { makeFacilitator } from "./facilitator";
+import { makePaywall } from "../src/shared/paywall";
 
 const NETWORK = (process.env.NETWORK ?? "eip155:84532") as `${string}:${string}`;
 const PAY_TO = (process.env.SELLER_PAY_TO ?? process.env.VERIFY_PAY_TO) as `0x${string}`;
@@ -36,23 +34,18 @@ const priceNow = (): `$${string}` => `$${(0.001 * (1 + surge * 0.5)).toFixed(4)}
 
 const app = express();
 
-const resourceServer = new x402ResourceServer(makeFacilitator()).register(
-  NETWORK,
-  new ExactEvmScheme(),
-);
-
+// makePaywall (src/shared/paywall.ts) builds the x402ResourceServer(makeFacilitator()).register(...)
+// + paymentMiddleware once, taking `price` as a per-request DynamicPrice callback — exactly the
+// shape this spike proved out. Only "GET /ping" is gated; the /_mode and /_surge control routes
+// below are never paywalled (paymentMiddleware only matches the registered route).
 app.use(
-  paymentMiddleware(
-    {
-      "GET /ping": {
-        // price is a CALLBACK, evaluated per request — native dynamic pricing
-        accepts: [{ scheme: "exact", payTo: PAY_TO, price: () => priceNow(), network: NETWORK }],
-        description: "spike ping",
-        mimeType: "application/json",
-      },
-    },
-    resourceServer,
-  ),
+  makePaywall({
+    routeKey: "GET /ping",
+    payTo: PAY_TO,
+    network: NETWORK,
+    priceNow, // CALLBACK, evaluated per request — native dynamic pricing
+    description: "spike ping",
+  }),
 );
 
 app.get("/ping", (_req, res) => {

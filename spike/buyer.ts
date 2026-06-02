@@ -8,13 +8,10 @@
  *   npm run spike:buyer                      # mode=error -> expect HTTP 500, NO tx, balance UNCHANGED
  *
  * Confirms §0 items: (a) end-to-end settlement + decoded SettleResponse,
- * (b) settle-vs-cancel via the balance delta. Items (c)/(d) come from introspect.ts / facilitator.ts.
+ * (b) settle-vs-cancel via the balance delta. Items (c)/(d) come from introspect.ts / src/shared/facilitator.ts.
  */
 import "dotenv/config";
-import { x402Client, wrapFetchWithPayment, x402HTTPClient } from "@x402/fetch";
-import { registerExactEvmScheme } from "@x402/evm/exact/client";
-import type { PaymentRequirements, SettleResponse } from "@x402/core/types";
-import { privateKeyToAccount } from "viem/accounts";
+import { makeBuyer } from "../src/shared/buyer";
 import { createPublicClient, http, erc20Abi } from "viem";
 import { baseSepolia } from "viem/chains";
 
@@ -30,29 +27,18 @@ if (!KEY || KEY === ("0x" as string)) {
   throw new Error("Set BUYER_PRIVATE_KEY (or ORCH_PRIVATE_KEY) in .env to a FUNDED testnet wallet");
 }
 
-const account = privateKeyToAccount(KEY);
-
-// Per-payment cap lives in the selector (v2 has no maxValue arg) — it chooses among accepts[].
-const selector = (_v: number, accepts: PaymentRequirements[]): PaymentRequirements => {
-  const affordable = accepts.filter((r) => BigInt(r.amount) <= CAP);
-  if (affordable.length === 0) {
-    throw new Error(`all ${accepts.length} payment options exceed per-payment cap ${CAP}`);
-  }
-  return affordable.reduce((a, b) => (BigInt(a.amount) <= BigInt(b.amount) ? a : b));
-};
-
-const client = new x402Client(selector);
-// Form B (helper) — confirmed exported by @x402/evm/exact/client. Confirm `signer` shape at runtime.
-registerExactEvmScheme(client, { signer: account });
-
-const pay = wrapFetchWithPayment(fetch, client);
-const httpClient = new x402HTTPClient(client);
+// makeBuyer (src/shared/buyer.ts) supplies the wrapped fetch + the capped cheapest-affordable
+// selector (v2 has no maxValue arg, so the per-payment cap lives in the selector) + readReceipt,
+// which wraps getPaymentSettleResponse in a try/catch — SPIKE FINDING (b): it THROWS "Payment
+// response header not found" on the cancel path (>=400 handler), so a missing settle header is
+// surfaced as undefined. This spike keeps only its own on-chain USDC balance-delta check below.
+const { pay, readReceipt, address } = makeBuyer(KEY, CAP);
 
 const pub = createPublicClient({ chain: baseSepolia, transport: http(process.env.EVM_RPC_URL) });
 const usdcBalance = () =>
-  pub.readContract({ address: USDC, abi: erc20Abi, functionName: "balanceOf", args: [account.address] });
+  pub.readContract({ address: USDC, abi: erc20Abi, functionName: "balanceOf", args: [address] });
 
-console.log(`buyer=${account.address}  network=${NETWORK}  cap=${CAP} atomic`);
+console.log(`buyer=${address}  network=${NETWORK}  cap=${CAP} atomic`);
 
 const before = await usdcBalance();
 const res = await pay(SELLER, { method: "GET" });
@@ -60,15 +46,10 @@ const res = await pay(SELLER, { method: "GET" });
 console.log(`\nHTTP ${res.status}`);
 console.log("body:", await res.text());
 
-// SPIKE FINDING (b): getPaymentSettleResponse THROWS "Payment response header not found" when
-// there is no X-PAYMENT-RESPONSE header — i.e. the cancel path (>=400 handler). It does NOT
-// return undefined. So the receipt reader MUST be wrapped (shared/buyer.ts will do the same).
-let settle: SettleResponse | undefined;
-try {
-  settle = httpClient.getPaymentSettleResponse((n) => res.headers.get(n));
-} catch {
-  settle = undefined; // no settle header => payment was cancelled, not settled
-}
+// SPIKE FINDING (b), now encapsulated in shared/buyer's readReceipt: getPaymentSettleResponse
+// THROWS "Payment response header not found" on the cancel path (>=400 handler) — it does NOT
+// return undefined. readReceipt's try/catch surfaces that missing-header case as undefined.
+const settle = readReceipt(res);
 console.log("\nSettleResponse:", JSON.stringify(settle ?? null, null, 2));
 
 // SPIKE FINDING (a): the facilitator returns the receipt OPTIMISTICALLY, before the tx is mined,
