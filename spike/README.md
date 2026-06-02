@@ -5,9 +5,11 @@ recursive demo. Everything in the plan's §5–§7 is "shape-only" until this pa
 
 ## Files
 - `introspect.ts` — prints the real export surface of every `@x402/*` subpath. No keys/network.
-- `facilitator.ts` — builds the facilitator client; fails loud if CDP auth isn't wired (finding d).
 - `seller.ts` — one `exact` 402 route on `:5001`, with a per-request price callback and a fail-mode toggle.
-- `buyer.ts` — pays the seller, prints the decoded `SettleResponse` + on-chain USDC balance delta.
+  Its paywall is built via the shared `makePaywall` (`src/shared/paywall.ts`), which wires the facilitator
+  client (`makeFacilitator`, finding d) — no spike-local copy.
+- `buyer.ts` — pays the seller via the shared `makeBuyer` (`src/shared/buyer.ts`: capped selector +
+  `readReceipt`), then prints the decoded `SettleResponse` + on-chain USDC balance delta.
 
 ## Prereqs (you provide — never hand keys to a tool, plan §3)
 In `.env`:
@@ -41,7 +43,8 @@ curl -XPOST localhost:5001/_surge     # bump the live price; re-buy to see the 4
       the middleware **cancelled**: NO `X-PAYMENT-RESPONSE` header attached, and on-chain balances were
       **unchanged** (buyer stayed at 19999000). This is the fact that *defines* stranded spend. **Gotcha:**
       `getPaymentSettleResponse(...)` **throws** `"Payment response header not found"` on the cancel path —
-      it does NOT return `undefined`. So `shared/buyer.ts`'s `readReceipt` must try/catch (done in spike).
+      it does NOT return `undefined`. So `shared/buyer.ts`'s `readReceipt` must try/catch — and the spike's
+      buyer now calls that shared `readReceipt` directly.
 - [x] **(c) Export surface — CONFIRMED** (`npm run spike:introspect`, deps installed, clean `tsc --noEmit`):
       both `ExactEvmScheme` (Form A) and `registerExactEvmScheme` (Form B) are exported from
       `@x402/evm/exact/{client,server}`; `x402Client` / `wrapFetchWithPayment` / `x402HTTPClient` from
@@ -53,7 +56,7 @@ curl -XPOST localhost:5001/_surge     # bump the live price; re-buy to see the 4
       partial settlement.
 - [x] **(d) Facilitator auth — RESOLVED.** The CDP facilitator needs `createAuthHeaders`, absent from
       `@x402/*`. Wired via `@coinbase/x402` `createFacilitatorConfig(CDP_API_KEY_ID, CDP_API_KEY_SECRET)`,
-      which supplies both the CDP v2 URL and the JWT auth (`spike/facilitator.ts`). Live reachability on
+      which supplies both the CDP v2 URL and the JWT auth (`src/shared/facilitator.ts`). Live reachability on
       Base Sepolia still confirmed by the (a) settlement run.
 
 ## Pre-confirmed by static analysis (no chain needed)
