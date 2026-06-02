@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cascade — x402 recursive payment chain</title>
+<style>
+  :root {
+    --bg:#0c0f17; --panel:#141925; --panel2:#1b2230; --line:#27303f;
+    --text:#e6ebf2; --muted:#8a97ab; --dim:#5c6b80;
+    --blue:#4c8dff; --green:#36d399; --amber:#fbbd23; --red:#f87272; --burn:#ff7a3c;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:var(--sans); font-size:14px; }
+  a { color:var(--blue); text-decoration:none; } a:hover { text-decoration:underline; }
+  header { padding:16px 22px; border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:16px; align-items:center; justify-content:space-between; }
+  .brand { display:flex; align-items:baseline; gap:12px; }
+  .brand h1 { font-size:18px; margin:0; letter-spacing:.2px; }
+  .brand .sub { color:var(--muted); font-size:12px; }
+  .conn { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--red); }
+  .dot.on { background:var(--green); box-shadow:0 0 8px var(--green); }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .controls .grp { display:flex; gap:4px; align-items:center; background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:4px 6px; }
+  .controls .grp > span { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.5px; margin:0 4px; }
+  button { font-family:var(--sans); font-size:13px; color:var(--text); background:var(--panel2); border:1px solid var(--line); border-radius:7px; padding:6px 12px; cursor:pointer; transition:.12s; }
+  button:hover { border-color:var(--blue); }
+  button:disabled { opacity:.5; cursor:default; }
+  button.run { background:var(--blue); border-color:var(--blue); color:#fff; font-weight:600; }
+  button.sel { background:var(--blue); border-color:var(--blue); color:#fff; }
+  button.mode-error.sel { background:var(--red); border-color:var(--red); }
+  button.mode-degraded.sel { background:var(--amber); border-color:var(--amber); color:#000; }
+  main { padding:18px 22px; display:grid; grid-template-columns: 420px 1fr; gap:18px; align-items:start; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); margin:0 0 12px; font-weight:600; }
+  .goalchip { font-family:var(--mono); font-size:12px; color:var(--muted); }
+  .goalchip b { color:var(--text); }
+  .right { display:flex; flex-direction:column; gap:18px; }
+  .cards { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  /* stranded */
+  .stranded .big { font-family:var(--mono); font-size:40px; font-weight:700; color:var(--burn); line-height:1; }
+  .stranded.zero .big { color:var(--dim); }
+  .stranded .cap { color:var(--muted); font-size:12px; margin-top:8px; }
+  /* budget */
+  .bbar { height:14px; background:var(--panel2); border-radius:7px; position:relative; margin:10px 0 6px; overflow:hidden; }
+  .bfill { height:100%; background:var(--green); width:0; transition:width .4s; }
+  .bfill.over { background:var(--red); }
+  .bcap { position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--text); }
+  .blabels { display:flex; justify-content:space-between; font-size:11px; color:var(--muted); font-family:var(--mono); }
+  .budget .verdict { font-size:12px; margin-top:10px; line-height:1.5; }
+  .budget .verdict .ok { color:var(--green); } .budget .verdict .bad { color:var(--red); }
+  /* tree */
+  svg { width:100%; display:block; }
+  .node rect { fill:var(--panel2); stroke:var(--line); stroke-width:1.5; rx:9; }
+  .node.active rect { stroke:var(--blue); }
+  .node.burned rect { fill:#2a1410; stroke:var(--burn); }
+  .node .name { fill:var(--text); font:600 13px var(--sans); }
+  .node .role { fill:var(--muted); font:11px var(--mono); }
+  .node.burned .name { fill:var(--burn); }
+  .edge { stroke:var(--line); stroke-width:2.5; fill:none; }
+  .edge.inflight { stroke:var(--amber); stroke-dasharray:6 5; animation:dash 1s linear infinite; }
+  .edge.settled { stroke:var(--green); }
+  .edge.failed { stroke:var(--red); stroke-dasharray:3 4; }
+  .edge.stranded { stroke:var(--burn); stroke-width:3.5; }
+  @keyframes dash { to { stroke-dashoffset:-22; } }
+  .elabel { font:11px var(--mono); fill:var(--muted); }
+  .elabel .amt { fill:var(--green); font-weight:600; }
+  .elabel.stranded .amt { fill:var(--burn); }
+  /* ledger */
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.4px; padding:6px 10px; border-bottom:1px solid var(--line); }
+  td { padding:7px 10px; border-bottom:1px solid var(--panel2); font-family:var(--mono); font-size:12px; }
+  td.amt { color:var(--green); } tr.stranded td.amt { color:var(--burn); }
+  .pos { color:var(--green); } .neg { color:var(--red); }
+  .empty { color:var(--dim); font-style:italic; padding:10px; }
+  /* histogram */
+  .hist { display:flex; gap:14px; align-items:flex-end; height:120px; padding-top:8px; }
+  .hbar { flex:1; display:flex; flex-direction:column; align-items:center; gap:6px; justify-content:flex-end; height:100%; }
+  .hbar .bar { width:70%; background:linear-gradient(180deg,var(--blue),#2d5bb0); border-radius:5px 5px 0 0; min-height:2px; transition:height .4s; }
+  .hbar .v { font-family:var(--mono); font-size:11px; color:var(--text); }
+  .hbar .l { font-size:11px; color:var(--muted); text-align:center; }
+  /* breaks */
+  .brk { border-left:3px solid var(--line); padding:8px 12px; margin-bottom:8px; background:var(--panel2); border-radius:0 8px 8px 0; }
+  .brk.budget { border-color:var(--amber); } .brk.stranded { border-color:var(--burn); } .brk.cancel { border-color:var(--blue); }
+  .brk .t { font-weight:600; font-size:13px; } .brk .d { color:var(--muted); font-size:12px; margin-top:3px; line-height:1.45; }
+  .wide { grid-column:1 / -1; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>⛓ Cascade</h1>
+    <span class="sub">x402 v2 recursive payment chain · Base Sepolia</span>
+  </div>
+  <div class="controls">
+    <button class="run" id="runBtn" onclick="runGoal()">▶ Run goal</button>
+    <div class="grp"><span>verify mode</span>
+      <button class="mode-ok" data-mode="ok" onclick="setMode('ok')">ok</button>
+      <button class="mode-degraded" data-mode="degraded" onclick="setMode('degraded')">degraded</button>
+      <button class="mode-error" data-mode="error" onclick="setMode('error')">error</button>
+    </div>
+    <div class="grp"><span>surge</span>
+      <button onclick="surge(4001,'search')">search</button>
+      <button onclick="surge(4002,'fetch')">fetch</button>
+      <button onclick="surge(4003,'verify')">verify</button>
+    </div>
+  </div>
+  <div class="conn"><span class="dot" id="dot"></span><span id="connTxt">connecting…</span></div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Payment tree</h2>
+    <div class="goalchip" id="goalChip">no goal yet</div>
+    <div id="tree"></div>
+    <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">
+      <span style="color:var(--green)">●</span> settled &nbsp;
+      <span style="color:var(--amber)">●</span> in&nbsp;flight &nbsp;
+      <span style="color:var(--red)">●</span> cancelled &nbsp;
+      <span style="color:var(--burn)">●</span> stranded
+    </div>
+  </section>
+
+  <div class="right">
+    <div class="cards">
+      <section class="panel stranded zero" id="strandedCard">
+        <h2>Stranded spend</h2>
+        <div class="big" id="strandedBig">$0</div>
+        <div class="cap">USDC that <b>settled on-chain</b> but produced nothing usable — and no v2 mechanism claws it back across hops.</div>
+      </section>
+      <section class="panel budget">
+        <h2>Per-goal budget</h2>
+        <div class="bbar"><div class="bfill" id="bfill"></div><div class="bcap" id="bcap"></div></div>
+        <div class="blabels"><span id="bChain">$0</span><span id="bCap">cap $0.03</span></div>
+        <div class="verdict" id="bVerdict"></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <h2>Live ledger · margins</h2>
+      <table>
+        <thead><tr><th>payer → payee</th><th>amount</th><th>tx</th></tr></thead>
+        <tbody id="ledgerBody"><tr><td colspan="3" class="empty">no settlements yet</td></tr></tbody>
+      </table>
+      <table style="margin-top:14px">
+        <thead><tr><th>agent</th><th>margin (charged − paid)</th></tr></thead>
+        <tbody id="marginBody"><tr><td colspan="2" class="empty">—</td></tr></tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Round-trip latency by hop depth <span style="text-transform:none;color:var(--dim)">— stacks because the chain is serial</span></h2>
+      <div class="hist" id="hist"></div>
+    </section>
+  </div>
+
+  <section class="panel wide">
+    <h2>What broke & why</h2>
+    <div id="breaks"><div class="empty">Run a goal. Flip verify to <b>degraded</b> to strand spend; <b>error</b> to see the cascade cancel.</div></div>
+  </section>
+</main>
+
+<script>
+const NODES = ["orchestrator","search","fetch","verify"];
+const EDGES = [["orchestrator","search"],["search","fetch"],["fetch","verify"]];
+const DEPTH = { orchestrator:1, search:2, fetch:3 }; // depth of the hop a given `from` initiates
+const EXPLORER = "https://sepolia.basescan.org/tx/";
+let allEvents = [];
+let currentMode = "ok";
+
+// ---------- control plane (cross-origin POSTs to each agent's own port) ----------
+async function runGoal() {
+  const b = document.getElementById("runBtn"); b.disabled = true; b.textContent = "running…";
+  try { await fetch("/goal", { method:"POST", headers:{"content-type":"application/json"}, body: JSON.stringify({ goal:"dashboard run" }) }); }
+  catch(e){ /* events arrive over WS regardless */ }
+  finally { b.disabled = false; b.textContent = "▶ Run goal"; }
+}
+function setMode(m){ currentMode = m; paintModeButtons(); fetch(`http://localhost:4003/mode/${m}`, {method:"POST", mode:"no-cors"}).catch(()=>{}); }
+function surge(port, _a){ fetch(`http://localhost:${port}/surge`, {method:"POST", mode:"no-cors"}).catch(()=>{}); }
+function paintModeButtons(){ document.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("sel", b.dataset.mode===currentMode)); }
+
+// ---------- websocket with reset-on-connect + auto-reconnect ----------
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}`);
+  const dot = document.getElementById("dot"), txt = document.getElementById("connTxt");
+  ws.onopen = () => { allEvents = []; dot.classList.add("on"); txt.textContent = "live"; };       // reset; replay rebuilds
+  ws.onclose = () => { dot.classList.remove("on"); txt.textContent = "reconnecting…"; setTimeout(connect, 1200); };
+  ws.onmessage = (m) => { try { allEvents.push(JSON.parse(m.data)); render(); } catch {} };
+}
+
+// ---------- derive active-goal state from the event stream ----------
+function activeGoalId(){ let g=null; for (const e of allEvents) if (e.type==="goal_start") g=e.goalId; return g; }
+function derive(goalId){
+  const evs = allEvents.filter(e => e.goalId===goalId);
+  const hops = {}; const stranded = []; const breaks = []; const settlements = [];
+  let goal="", cap=null, enforced=0, chainTotal=0, state="running";
+  for (const e of evs){
+    const key = e.from!==undefined ? `${e.from}->${e.to}` : null;
+    switch(e.type){
+      case "goal_start": goal=e.goal; cap=e.capUsd; break;
+      case "hop_start": hops[key] = { ...(hops[key]||{}), state:"inflight" }; break;
+      case "hop_settled":
+        hops[key] = { state:"settled", amountUsd:e.amountUsd, tx:e.tx, latencyMs:e.latencyMs, from:e.from, to:e.to };
+        settlements.push({ from:e.from, to:e.to, amountUsd:e.amountUsd, tx:e.tx });
+        chainTotal += e.amountUsd; break;
+      case "hop_failed": hops[key] = { ...(hops[key]||{}), state:"failed", reason:e.reason }; break;
+      case "stranded":
+        stranded.push(e);
+        breaks.push({ kind:"stranded", t:`Stranded spend — no cross-hop rollback`,
+          d:`${e.agent} settled $${e.amountUsd} with its downstream (${shortTx(e.tx)}) but couldn't resell → it returned 5xx → its upstream payment was cancelled. ${e.agent} ate the loss. An exact-scheme "refund" would be a new transfer the payee has no reason to send; a batch-settlement refund is per-channel — neither cascades up (§11 #2).` });
+        break;
+      case "budget_exceeded":
+        enforced=e.enforcedUsd; chainTotal=e.chainTotalUsd;
+        breaks.push({ kind:"budget", t:`Per-payment cap ≠ per-goal cap`,
+          d:`The orchestrator enforced only $${e.enforcedUsd} (hop 1, the one it pays) but the reconstructed chain total $${e.chainTotalUsd} blew the $${e.capUsd} goal cap. x402 authorizes one transfer per resource — even upto bounds a single hop. Nothing bounds the chain (§11 #3).` });
+        break;
+      case "goal_done": state="done"; break;
+      case "goal_failed": state="failed"; break;
+    }
+  }
+  // mark the stranded settled-edge + burned node
+  let burned=null;
+  for (const s of stranded){ burned=s.agent; for (const k in hops){ if (hops[k].from===s.agent && hops[k].state==="settled") hops[k].stranded=true; } }
+  // if the goal ended in failure, any hop still "inflight" never settled => it was cancelled.
+  // (the orchestrator emits goal_failed, not a hop_failed, for its own orch->search hop.)
+  if (state==="failed"){ for (const k in hops){ if (hops[k].state==="inflight"){ hops[k].state="failed"; hops[k].reason="cancelled (goal failed upstream)"; } } }
+  // cancellations are a (quiet) limitation artifact too
+  for (const k in hops){ if (hops[k].state==="failed") breaks.push({ kind:"cancel", t:`Settle-on-2xx protected the buyer`, d:`${k} returned ≥400 → the middleware cancelled the payment. No money moved on this hop — the opposite of stranding (§0.1).` }); }
+  return { goal, cap, enforced, chainTotal:round(chainTotal), state, hops, stranded, settlements, breaks, burned };
+}
+
+// ---------- render ----------
+function render(){
+  const gid = activeGoalId(); if (!gid){ return; }
+  const d = derive(gid);
+  document.getElementById("goalChip").innerHTML = `goal <b>${gid}</b> · ${esc(d.goal)} · <span style="color:${d.state==='failed'?'var(--red)':d.state==='done'?'var(--green)':'var(--amber)'}">${d.state}</span>`;
+  renderTree(d); renderStranded(d); renderBudget(d); renderLedger(d); renderHist(d); renderBreaks(d);
+}
+
+function renderTree(d){
+  const W=388, NH=58, NW=210, NX=(W-NW)/2, gap=42, top=6;
+  const yOf = i => top + i*(NH+gap);
+  let s = `<svg viewBox="0 0 ${W} ${4*NH+3*gap+top+10}">`;
+  // edges first
+  EDGES.forEach((e,i)=>{
+    const k=`${e[0]}->${e[1]}`, h=d.hops[k]||{state:"idle"};
+    const y1=yOf(i)+NH, y2=yOf(i+1), midY=(y1+y2)/2, cx=W/2;
+    let cls="edge"; if(h.stranded) cls+=" stranded"; else if(h.state==="settled") cls+=" settled"; else if(h.state==="inflight") cls+=" inflight"; else if(h.state==="failed") cls+=" failed";
+    s += `<path class="${cls}" d="M${cx} ${y1} L${cx} ${y2}"/>`;
+    if (h.state==="settled"){
+      const lc = h.stranded ? "elabel stranded" : "elabel";
+      s += `<text class="${lc}" x="${cx+12}" y="${midY-2}"><tspan class="amt">$${h.amountUsd}</tspan>${h.stranded?' 🔥':''}</text>`;
+      if (h.tx) s += `<text class="elabel" x="${cx+12}" y="${midY+12}">${shortTx(h.tx)}</text>`;
+    } else if (h.state==="failed"){
+      s += `<text class="elabel" x="${cx+12}" y="${midY+3}" fill="var(--red)">cancelled</text>`;
+    }
+  });
+  // nodes
+  NODES.forEach((n,i)=>{
+    const y=yOf(i); const burned = d.burned===n;
+    const touched = Object.keys(d.hops).some(k=>k.startsWith(n+"->")||k.endsWith("->"+n));
+    const cls = "node"+(burned?" burned":(touched?" active":""));
+    const role = n==="orchestrator"?"top buyer":(n==="verify"?"terminal seller":"seller + buyer");
+    s += `<g class="${cls}"><rect x="${NX}" y="${y}" width="${NW}" height="${NH}" rx="9"/>`+
+         `<text class="name" x="${W/2}" y="${y+24}" text-anchor="middle">${n}${burned?' 🔥':''}</text>`+
+         `<text class="role" x="${W/2}" y="${y+42}" text-anchor="middle">${role}</text></g>`;
+  });
+  s += `</svg>`;
+  document.getElementById("tree").innerHTML = s;
+}
+
+function renderStranded(d){
+  const card=document.getElementById("strandedCard");
+  const total=round(d.stranded.reduce((a,s)=>a+s.amountUsd,0));
+  document.getElementById("strandedBig").textContent = `$${total}`;
+  card.classList.toggle("zero", total===0);
+}
+function renderBudget(d){
+  const cap=d.cap??0.03, chain=d.chainTotal, over=chain>cap;
+  const pct=Math.min(100, cap?(chain/(cap*1.4))*100:0), capPct=Math.min(100,(cap/(cap*1.4))*100);
+  const f=document.getElementById("bfill"); f.style.width=pct+"%"; f.classList.toggle("over",over);
+  document.getElementById("bcap").style.left=capPct+"%";
+  document.getElementById("bChain").textContent=`chain $${chain}`;
+  document.getElementById("bCap").textContent=`cap $${cap}`;
+  const enf=d.enforced||0;
+  document.getElementById("bVerdict").innerHTML = chain>0
+    ? `<span class="ok">✓ hop-1 cap held: $${enf} ≤ $${cap}</span><br>${over?`<span class="bad">✗ chain total $${chain} &gt; $${cap} — orchestrator had no veto over lower hops</span>`:`within cap`}`
+    : `<span style="color:var(--muted)">no settlements yet</span>`;
+}
+function renderLedger(d){
+  const lb=document.getElementById("ledgerBody");
+  lb.innerHTML = d.settlements.length ? d.settlements.map(s=>{
+    const strandedRow = d.stranded.some(x=>x.agent===s.from && x.tx===s.tx);
+    return `<tr class="${strandedRow?'stranded':''}"><td>${s.from} → ${s.to}</td><td class="amt">$${s.amountUsd}</td><td>${s.tx?`<a href="${EXPLORER}${s.tx}" target="_blank">${shortTx(s.tx)}</a>`:'—'}</td></tr>`;
+  }).join("") : `<tr><td colspan="3" class="empty">no settlements yet</td></tr>`;
+  // margins
+  const rev={}, cost={};
+  for (const s of d.settlements){ rev[s.to]=(rev[s.to]||0)+s.amountUsd; cost[s.from]=(cost[s.from]||0)+s.amountUsd; }
+  const agents=[...new Set([...Object.keys(rev),...Object.keys(cost)])];
+  const mb=document.getElementById("marginBody");
+  mb.innerHTML = agents.length ? agents.map(a=>{
+    const m=round((rev[a]||0)-(cost[a]||0)); const cls=m>0?"pos":(m<0?"neg":"");
+    return `<tr><td>${a}</td><td class="${cls}">${m>0?'+':''}$${m}</td></tr>`;
+  }).join("") : `<tr><td colspan="2" class="empty">—</td></tr>`;
+}
+function renderHist(d){
+  const rows=[1,2,3].map(depth=>{
+    const hop=Object.values(d.hops).find(h=>h.state==="settled"&&DEPTH[h.from]===depth);
+    return { depth, label:hopLabel(depth), ms: hop?.latencyMs ?? null };
+  });
+  const max=Math.max(1,...rows.map(r=>r.ms||0));
+  document.getElementById("hist").innerHTML = rows.map(r=>{
+    const h = r.ms!=null ? Math.max(2,(r.ms/max)*100) : 2;
+    return `<div class="hbar"><div class="v">${r.ms!=null?r.ms+'ms':'—'}</div><div class="bar" style="height:${h}%"></div><div class="l">depth ${r.depth}<br>${r.label}</div></div>`;
+  }).join("");
+}
+function renderBreaks(d){
+  const el=document.getElementById("breaks");
+  if (!d.breaks.length){ el.innerHTML = `<div class="empty">Run a goal. Flip verify to <b>degraded</b> to strand spend; <b>error</b> to see the cascade cancel.</div>`; return; }
+  // de-dupe identical cancel lines, keep order
+  const seen=new Set(); const items=d.breaks.filter(b=>{ const k=b.kind+b.t+(b.d||""); if(seen.has(k))return false; seen.add(k); return true; });
+  el.innerHTML = items.map(b=>`<div class="brk ${b.kind}"><div class="t">${b.t}</div><div class="d">${b.d}</div></div>`).join("");
+}
+
+// ---------- helpers ----------
+function round(n){ return +(+n).toFixed(6); }
+function shortTx(tx){ return tx ? tx.slice(0,8)+"…"+tx.slice(-4) : "—"; }
+function hopLabel(depth){ return depth===1?"orch→search":depth===2?"search→fetch":"fetch→verify"; }
+function esc(s){ return String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+paintModeButtons();
+connect();
+</script>
+</body>
+</html>

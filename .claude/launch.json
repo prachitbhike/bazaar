@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "cascade",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "orchestrator"],
+      "port": 4000,
+      "autoPort": false
+    }
+  ]
+}
