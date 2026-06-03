@@ -28,12 +28,18 @@ const httpServer = createServer(app);
 const wss = new WebSocketServer({ server: httpServer });
 
 const ledger = new Ledger();
-const eventLog: CascadeEvent[] = []; // append-only history (per-process, in-memory)
+// Bounded, append-only history (per-process, in-memory). Capped so the two full-log scans below —
+// the WS-reconnect replay and GET /state — cost O(EVENT_LOG_MAX), NOT O(total-events-ever). Once
+// full we evict the oldest event (a ring buffer); a dashboard that connects late sees the most
+// recent window (≈ the last ~70 goals at ~15 events each), which is all the live view needs (§9).
+const EVENT_LOG_MAX = 1000;
+const eventLog: CascadeEvent[] = [];
 
 // SINGLE funnel for EVERY event — orchestrator's own AND the agents'.
 function emit(evt: CascadeEvent): void {
   const stamped = { ...evt, ts: evt.ts ?? Date.now() } as CascadeEvent;
   eventLog.push(stamped);
+  if (eventLog.length > EVENT_LOG_MAX) eventLog.shift(); // drop oldest — keep the buffer bounded
   ledger.apply(stamped);
   const msg = JSON.stringify(stamped);
   for (const c of wss.clients) {
@@ -52,7 +58,7 @@ function emit(evt: CascadeEvent): void {
 // it at the server level too so a listener failure can't kill the orchestrator.
 wss.on("error", (err) => console.error("[ws] server error:", err));
 
-// Replay the log to every new/refreshed dashboard (a raw WS broadcast is ephemeral, §9).
+// Replay the (bounded) log to every new/refreshed dashboard (a raw WS broadcast is ephemeral, §9).
 wss.on("connection", (ws) => {
   ws.on("error", (err) => console.error("[ws] connection error:", err));
   for (const evt of eventLog) {
@@ -65,7 +71,7 @@ wss.on("connection", (ws) => {
   }
 });
 
-// Explicit pull alternative to the WS replay.
+// Explicit pull alternative to the WS replay — serves the same bounded window.
 app.get("/state", (req, res) => {
   const goalId = req.query.goalId as string | undefined;
   res.json(goalId ? eventLog.filter((e) => e.goalId === goalId) : eventLog);
