@@ -15,7 +15,7 @@ import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import { makeBuyer, readBody, readSettlement, composeSettlement } from "../shared/buyer";
 import { Ledger } from "./ledger";
-import { BudgetGuard } from "./budget";
+import { GOAL_CAP_USD } from "./budget";
 import { runInHopContext } from "../shared/hops";
 import type { CascadeEvent } from "../shared/types";
 
@@ -88,11 +88,8 @@ app.use(express.static(path.join(__dirname, "..", "dashboard")));
 
 app.post("/goal", async (req, res) => {
   const goalId = randomUUID().slice(0, 8);
-  // Cap is set BELOW the base chain total ($0.02 + $0.01 + $0.005 = $0.035) so the overage shows
-  // WITHOUT surging (§7/§11 row 3). Surge to make it more dramatic.
-  const budget = new BudgetGuard(0.03);
 
-  emit({ type: "goal_start", goalId, goal: req.body?.goal ?? "demo goal", capUsd: budget.capUsd });
+  emit({ type: "goal_start", goalId, goal: req.body?.goal ?? "demo goal", capUsd: GOAL_CAP_USD });
   emit({ type: "hop_start", from: "orchestrator", to: "search", goalId });
 
   // Authoritative, in-band totals — propagated up the synchronous call chain from each seller's
@@ -101,6 +98,7 @@ app.post("/goal", async (req, res) => {
   // live dashboard + per-agent margins (via emit() -> ledger.apply), but no longer backs these numbers.
   let chainTotalUsd = 0;
   let strandedUsd = 0;
+  let enforcedUsd = 0; // what the orchestrator could actually enforce: its own hop-1 payment
   let resultData: unknown = null;
 
   try {
@@ -137,21 +135,21 @@ app.post("/goal", async (req, res) => {
         latencyMs: Math.max(0, hopMs - downstream.latencyMs), // TRUE per-hop latency: our RT minus search's own (#5)
       });
 
-      // Fold in our settled hop (same operation each agent does) BEFORE record(), so money that moved
-      // stays observable even if the hop-1 cap enforcement below throws — the headline's whole job (§7).
+      // Fold in our settled hop (same operation each agent does). `enforcedUsd` is hop 1 — all the
+      // orchestrator itself could enforce; the lower hops it can't veto are exactly the point (§7).
       ({ settledUsd: chainTotalUsd, strandedUsd } = composeSettlement(paidUsd, 0, downstream, 0));
-      budget.record(paidUsd); // enforces HOP 1 ONLY — see budget.ts; can't veto lower hops
+      enforcedUsd = paidUsd;
     });
 
     // Breach is detectable only AFTER the fact, from the reconstructed chain total (observability,
-    // not enforcement) — now sourced in-band, independent of /ingest delivery (#2).
-    if (chainTotalUsd > budget.capUsd) {
+    // NOT enforcement — see budget.ts) — now sourced in-band, independent of /ingest delivery (#2).
+    if (chainTotalUsd > GOAL_CAP_USD) {
       emit({
         type: "budget_exceeded",
         goalId,
-        capUsd: budget.capUsd,
+        capUsd: GOAL_CAP_USD,
         chainTotalUsd,
-        enforcedUsd: budget.spent,
+        enforcedUsd,
         detail: "goal cap blown by lower hops the orchestrator could not veto",
       });
     }
