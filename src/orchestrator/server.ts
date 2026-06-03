@@ -15,7 +15,7 @@ import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import { makeBuyer, readBody, readSettlement, composeSettlement } from "../shared/buyer";
 import { Ledger } from "./ledger";
-import { BudgetGuard } from "./budget";
+import { GOAL_CAP_USD } from "./budget";
 import { runInHopContext } from "../shared/hops";
 import type { CascadeEvent } from "../shared/types";
 
@@ -28,12 +28,18 @@ const httpServer = createServer(app);
 const wss = new WebSocketServer({ server: httpServer });
 
 const ledger = new Ledger();
-const eventLog: CascadeEvent[] = []; // append-only history (per-process, in-memory)
+// Bounded, append-only history (per-process, in-memory). Capped so the two full-log scans below —
+// the WS-reconnect replay and GET /state — cost O(EVENT_LOG_MAX), NOT O(total-events-ever). Once
+// full we evict the oldest event (a ring buffer); a dashboard that connects late sees the most
+// recent window (≈ the last ~70 goals at ~15 events each), which is all the live view needs (§9).
+const EVENT_LOG_MAX = 1000;
+const eventLog: CascadeEvent[] = [];
 
 // SINGLE funnel for EVERY event — orchestrator's own AND the agents'.
 function emit(evt: CascadeEvent): void {
   const stamped = { ...evt, ts: evt.ts ?? Date.now() } as CascadeEvent;
   eventLog.push(stamped);
+  if (eventLog.length > EVENT_LOG_MAX) eventLog.shift(); // drop oldest — keep the buffer bounded
   ledger.apply(stamped);
   const msg = JSON.stringify(stamped);
   for (const c of wss.clients) {
@@ -52,7 +58,7 @@ function emit(evt: CascadeEvent): void {
 // it at the server level too so a listener failure can't kill the orchestrator.
 wss.on("error", (err) => console.error("[ws] server error:", err));
 
-// Replay the log to every new/refreshed dashboard (a raw WS broadcast is ephemeral, §9).
+// Replay the (bounded) log to every new/refreshed dashboard (a raw WS broadcast is ephemeral, §9).
 wss.on("connection", (ws) => {
   ws.on("error", (err) => console.error("[ws] connection error:", err));
   for (const evt of eventLog) {
@@ -65,7 +71,7 @@ wss.on("connection", (ws) => {
   }
 });
 
-// Explicit pull alternative to the WS replay.
+// Explicit pull alternative to the WS replay — serves the same bounded window.
 app.get("/state", (req, res) => {
   const goalId = req.query.goalId as string | undefined;
   res.json(goalId ? eventLog.filter((e) => e.goalId === goalId) : eventLog);
@@ -83,18 +89,13 @@ const ORCH_PRIVATE_KEY = process.env.ORCH_PRIVATE_KEY;
 if (!ORCH_PRIVATE_KEY || ORCH_PRIVATE_KEY === "0x") throw new Error("ORCH_PRIVATE_KEY is required");
 
 const { pay, readReceipt, settledAmountUsd } = makeBuyer(ORCH_PRIVATE_KEY as `0x${string}`, 50_000n);
-const budgets = new Map<string, BudgetGuard>(); // keyed by goalId, NOT a singleton (§12)
 
 app.use(express.static(path.join(__dirname, "..", "dashboard")));
 
 app.post("/goal", async (req, res) => {
   const goalId = randomUUID().slice(0, 8);
-  // Cap is set BELOW the base chain total ($0.02 + $0.01 + $0.005 = $0.035) so the overage shows
-  // WITHOUT surging (§7/§11 row 3). Surge to make it more dramatic.
-  const budget = new BudgetGuard(0.03);
-  budgets.set(goalId, budget);
 
-  emit({ type: "goal_start", goalId, goal: req.body?.goal ?? "demo goal", capUsd: budget.capUsd });
+  emit({ type: "goal_start", goalId, goal: req.body?.goal ?? "demo goal", capUsd: GOAL_CAP_USD });
   emit({ type: "hop_start", from: "orchestrator", to: "search", goalId });
 
   // Authoritative, in-band totals — propagated up the synchronous call chain from each seller's
@@ -103,6 +104,7 @@ app.post("/goal", async (req, res) => {
   // live dashboard + per-agent margins (via emit() -> ledger.apply), but no longer backs these numbers.
   let chainTotalUsd = 0;
   let strandedUsd = 0;
+  let enforcedUsd = 0; // what the orchestrator could actually enforce: its own hop-1 payment
   let resultData: unknown = null;
 
   try {
@@ -139,21 +141,21 @@ app.post("/goal", async (req, res) => {
         latencyMs: Math.max(0, hopMs - downstream.latencyMs), // TRUE per-hop latency: our RT minus search's own (#5)
       });
 
-      // Fold in our settled hop (same operation each agent does) BEFORE record(), so money that moved
-      // stays observable even if the hop-1 cap enforcement below throws — the headline's whole job (§7).
+      // Fold in our settled hop (same operation each agent does). `enforcedUsd` is hop 1 — all the
+      // orchestrator itself could enforce; the lower hops it can't veto are exactly the point (§7).
       ({ settledUsd: chainTotalUsd, strandedUsd } = composeSettlement(paidUsd, 0, downstream, 0));
-      budget.record(paidUsd); // enforces HOP 1 ONLY — see budget.ts; can't veto lower hops
+      enforcedUsd = paidUsd;
     });
 
     // Breach is detectable only AFTER the fact, from the reconstructed chain total (observability,
-    // not enforcement) — now sourced in-band, independent of /ingest delivery (#2).
-    if (chainTotalUsd > budget.capUsd) {
+    // NOT enforcement — see budget.ts) — now sourced in-band, independent of /ingest delivery (#2).
+    if (chainTotalUsd > GOAL_CAP_USD) {
       emit({
         type: "budget_exceeded",
         goalId,
-        capUsd: budget.capUsd,
+        capUsd: GOAL_CAP_USD,
         chainTotalUsd,
-        enforcedUsd: budget.spent,
+        enforcedUsd,
         detail: "goal cap blown by lower hops the orchestrator could not veto",
       });
     }

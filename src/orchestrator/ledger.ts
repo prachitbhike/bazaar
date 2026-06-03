@@ -2,13 +2,9 @@
  * Ledger — per-goalId reconstruction of the payment chain from the event stream (plan §7).
  *
  * The orchestrator only directly pays hop 1; every lower hop reports its settlement via /ingest.
- * The Ledger replays those events to recover the TRUE chain total and each agent's margin — which
- * is exactly the observability that exposes the per-goal budget breach the orchestrator can't
- * enforce (§7/§11 row 3).
- *
- * Margin convention: in a `hop_settled {from, to, amountUsd}`, `to` earns amountUsd (revenue) and
- * `from` spends it (cost). margin[agent] = revenue[agent] - cost[agent]. The terminal seller
- * (verify) has only revenue; the orchestrator has only cost (pure buyer).
+ * The Ledger replays those events to recover the TRUE chain total — which is exactly the
+ * observability that exposes the per-goal budget breach the orchestrator can't enforce (§7/§11
+ * row 3).
  */
 import type { AgentName, CascadeEvent } from "../shared/types";
 
@@ -61,20 +57,5 @@ export class Ledger {
     const g = this.goals.get(goalId);
     if (!g) return 0;
     return +g.stranded.reduce((s, x) => s + x.amountUsd, 0).toFixed(6);
-  }
-
-  /** Per-agent margin = revenue (paid to it) - cost (it paid downstream). */
-  margins(goalId: string): Record<string, number> {
-    const g = this.goals.get(goalId);
-    const revenue: Record<string, number> = {};
-    const cost: Record<string, number> = {};
-    for (const s of g?.settlements ?? []) {
-      revenue[s.to] = (revenue[s.to] ?? 0) + s.amountUsd;
-      cost[s.from] = (cost[s.from] ?? 0) + s.amountUsd;
-    }
-    const agents = new Set([...Object.keys(revenue), ...Object.keys(cost)]);
-    const out: Record<string, number> = {};
-    for (const a of agents) out[a] = +((revenue[a] ?? 0) - (cost[a] ?? 0)).toFixed(6);
-    return out;
   }
 }
