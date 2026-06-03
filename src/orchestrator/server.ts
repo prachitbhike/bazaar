@@ -83,7 +83,6 @@ const ORCH_PRIVATE_KEY = process.env.ORCH_PRIVATE_KEY;
 if (!ORCH_PRIVATE_KEY || ORCH_PRIVATE_KEY === "0x") throw new Error("ORCH_PRIVATE_KEY is required");
 
 const { pay, readReceipt, settledAmountUsd } = makeBuyer(ORCH_PRIVATE_KEY as `0x${string}`, 50_000n);
-const budgets = new Map<string, BudgetGuard>(); // keyed by goalId, NOT a singleton (§12)
 
 app.use(express.static(path.join(__dirname, "..", "dashboard")));
 
@@ -92,7 +91,6 @@ app.post("/goal", async (req, res) => {
   // Cap is set BELOW the base chain total ($0.02 + $0.01 + $0.005 = $0.035) so the overage shows
   // WITHOUT surging (§7/§11 row 3). Surge to make it more dramatic.
   const budget = new BudgetGuard(0.03);
-  budgets.set(goalId, budget);
 
   emit({ type: "goal_start", goalId, goal: req.body?.goal ?? "demo goal", capUsd: budget.capUsd });
   emit({ type: "hop_start", from: "orchestrator", to: "search", goalId });

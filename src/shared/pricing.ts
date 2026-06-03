@@ -22,10 +22,6 @@ export function bumpLoad(agent: Seller, by = 1): void {
   load[agent] = (load[agent] ?? 0) + by;
 }
 
-export function loadFor(agent: Seller): number {
-  return load[agent] ?? 0;
-}
-
 /** Current price in USD (number) — used for ledgering the exact charge echoed in-band (§5). */
 export function priceForUsd(agent: Seller): number {
   const surge = 1 + Math.min(load[agent] ?? 0, 10) * 0.05; // up to +50%
